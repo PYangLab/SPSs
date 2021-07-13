@@ -1,0 +1,330 @@
+---
+title: "Evaluating the stability of SPSs"
+author: "Di Xiao"
+date: "`r paste0('Initiated on 2021 April, compiled on ', format(Sys.time(), '%Y %b %d'))`"
+output:
+  html_document:
+    code_folding: hide
+    fig_height: 6
+    fig_width: 6
+    toc: yes
+    number_sections: true
+    toc_depth: 3
+    toc_float: yes
+    theme: paper
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# set environment
+```{r}
+library(coexnet)
+library(qusage)
+library(PhosR)
+library(ggplot2)
+library(STRINGdb)
+library(epitools)
+
+load("datasets//human_SPS_v2.RData")
+hSPSs <- names(fisher.adj.p[which(fisher.adj.p < 0.01)])
+
+load("datasets/mid_bot_ran.RData")
+load("datasets/feature_matrix.RData")
+source("R/Functions.R")
+
+SPSs.gene <- sapply(strsplit(hSPSs, ";"), function(x)x[1])
+SPS.prot <- phosphosites.human$Uniprot[match(hSPSs, phosphosites.human$Var1)]
+ranGene <- sapply(ranSites, function(x) {
+    sapply(strsplit(as.character(x), ";"), function(y)y[1])})
+allGene <- unique(phosphosites.human$geneSymbol)
+```
+
+## PPI (String database)
+```{r}
+String <- read.table("public resource/9606.protein.links.v11.0.txt", header = T)
+String <- String[which(String$combined_score > 900), ] #The combined score is computed by combining the probabilities from the different evidence channels and corrected for the probability of randomly observing an interaction. the scores are multiplied by 1000 to make them integers
+
+## name mapping
+name.mapping <- read.delim("../public resource/HUMAN_9606_idmapping.dat", header = FALSE)
+name.mapping.String <- name.mapping[which(name.mapping$V2 == "STRING"), ]
+name.mapping.geneSymbol <- name.mapping[which(name.mapping$V2 == "Gene_Name"), ]
+
+idx1 <- match(String$protein1, name.mapping.String$V3)
+String$prot1 <- name.mapping.String$V1[idx1]
+idx2 <- match(String$prot1, name.mapping.geneSymbol$V1)
+String$gene1 <- name.mapping.geneSymbol$V3[idx2]
+
+idx3 <- match(String$protein2, name.mapping.String$V3)
+String$prot2 <- name.mapping.String$V1[idx3]
+idx4 <- match(String$prot2, name.mapping.geneSymbol$V1)
+String$gene2 <- name.mapping.geneSymbol$V3[idx4]
+
+## SPS (how many PPI for SPS host gene)
+SPS.interactions <- list()
+for (gene in SPSs.gene) {
+    SPS.interactions[[gene]] <- length(which(String$gene1 == gene)) + length(which(String$gene2 == gene))
+}
+
+interaction.rank <- unlist(SPS.interactions)
+names(interaction.rank) <- names(SPS.interactions)
+interaction.rank <- sort(interaction.rank, decreasing = TRUE)
+
+
+## All sites (how many PPI for all sites)
+All.interactions <- list()
+for (gene in allGene) {
+    All.interactions[[gene]] <- length(which(String$gene1 == gene)) + length(which(String$gene2 == gene))
+}
+
+## number of PPI
+boxplot(unlist(SPS.interactions), unlist(All.interactions), notch = TRUE, 
+            col = c("#E41A1C", "#F29403"))
+wilcox.test(log2(unlist(SPS.interactions)), log2(unlist(All.interactions)), alternative = "two.sided")
+
+# save(SPS.interactions, All.interactions, file = "~/Dropbox (Sydney Uni)/Mining of publicly available phosphoproteomics data identify common signalome/phospho_mining_Di/saved_data/interactions_v2.RData")
+```
+
+
+## PPI (prePPI database)
+```{r}
+prePPI <- read.delim("../public resource/preppi_final600.txt")
+
+name.mapping.prePPI <- name.mapping[which(name.mapping$V2 == "Gene_Name"), ]
+idx1 <- match(prePPI$prot1, name.mapping.prePPI$V1)
+prePPI$gene1 <- name.mapping.prePPI$V3[idx1]
+
+idx2 <- match(prePPI$prot2, name.mapping.prePPI$V1)
+prePPI$gene2 <- name.mapping.prePPI$V3[idx2]
+
+## SPS
+SPS.interactions.prePPI <- list()
+for (gene in SPSs.gene) {
+    SPS.interactions.prePPI[[gene]] <- length(which(prePPI$gene1 == gene)) + length(which(prePPI$gene2 == gene))
+}
+
+## All sites
+All.interactions.prePPI <- list()
+for (gene in allGene) {
+    All.interactions.prePPI[[gene]] <- length(which(prePPI$gene1 == gene)) + length(which(prePPI$gene2 == gene))
+}
+
+# save(SPS.interactions, All.interactions, file = "~/Dropbox (Sydney Uni)/Mining of publicly available phosphoproteomics data identify common signalome/phospho_mining_Di/saved_data/prePPI_interactions.RData")
+
+load("~/Dropbox (Sydney Uni)/Mining of publicly available phosphoproteomics data identify common signalome/phospho_mining_Di/saved_data/prePPI_interactions.RData")
+
+## number of interactions
+boxplot(log2(unlist(SPS.interactions.prePPI) + 1), log2(unlist(All.interactions.prePPI) + 1), notch = TRUE, 
+            col = c("#E41A1C", "#F29403"))
+
+wilcox.test(unlist(SPS.interactions.prePPI), unlist(All.interactions.prePPI), alternative = "two.sided")
+
+```
+
+## Cancer gene enrichment
+```{r}
+# Computational gene sets defined by mining large collections of cancer-oriented microarray data. The C4 collection is divided into two sub-collections: CGN and CM.
+Cancer.gene <- read.gmt("public resource/c4.all.v7.4.symbols.gmt")
+
+e1 <- pathwayOverrepresent(SPSs.gene, universe = phosphosites.human$geneSymbol, alter = "greater", annotation = Cancer.gene)
+e2 <- pathwayOverrepresent(ranGene[,6], universe = phosphosites.human$geneSymbol, alter = "greater", annotation = Cancer.gene)
+ 
+## barplot for all
+df1 <- data.frame(value = -log10(as.numeric(e1[, 1])), names = rownames(e1[,]), group <- rep("SPS", nrow(e1)))
+df1 <- df1[which(df1$value > 0), ]
+colnames(df1)[3] <- "group"
+df2 <- data.frame(value = -log10(as.numeric(e2[which(rownames(e2) %in% rownames(e1)), 1])), names = rownames(e2[which(rownames(e2) %in% rownames(e1)),]), group <- rep("Random", nrow(e2)))
+df2 <- df2[which(df2$value > 0), ]
+colnames(df2)[3] <- "group"
+
+o <- union(df1$names, df2$names)
+df1 <- rbind(df1, data.frame(value = 0, names = setdiff(o, df1$names), group = "SPS"))
+df2 <- rbind(df2, data.frame(value = 0, names = setdiff(o, df2$names), group = "Random"))
+
+df <- rbind(df1, df2)
+df$names <- factor(df$names, levels = rownames(e1))
+df$group <- factor(df$group, levels = c("SPS", "Random"))
+
+ggplot(df, aes(fill=group, y=value, x=names)) + 
+    geom_bar(position="dodge", stat="identity") +
+    scale_x_discrete(guide = guide_axis(angle = 90)) +
+    scale_fill_manual(values=c("#E41A1C", "#BC9DCC")) +
+    theme_classic()
+
+## top five
+df1 <- data.frame(value = -log10(as.numeric(e1[1:5, 1])), names = rownames(e1[1:5,]), group <- rep("SPS", 5))
+colnames(df1)[3] <- "group"
+df2 <- data.frame(value = -log10(as.numeric(e2[which(rownames(e2) %in% rownames(e1[1:5,])), 1])), names = rownames(e2[which(rownames(e2) %in% rownames(e1[1:5,])),]), group <- rep("Random", 5))
+colnames(df2)[3] <- "group"
+
+df <- rbind(df1, df2)
+df$names <- factor(df$names, levels = rownames(e1))
+df$group <- factor(df$group, levels = c("SPS", "Random"))
+
+ggplot(df, aes(fill=group, y=value, x=names)) + 
+    geom_bar(position="dodge", stat="identity") +
+    scale_x_discrete(guide = guide_axis(angle = 90)) +
+    scale_fill_manual(values=c("#E41A1C", "#BC9DCC")) +
+    theme_classic()
+```
+## define the spliceosome SPS
+```{r}
+splicing.gene  <- c("SRSF9", "HNRNPK", "SRRM1", "SRSF6", "HNRNPH1", "RBMX", "SF3B2", "SRSF1", "RBM5", "HNRNPH2", "U2AF2", "SNRNP200", "RBM8A", "SRSF11") # Reactome
+spliceosome.gene <- c("SRSF9", "HNRNPK", "RBM25", "SNW1", "SRSF6", "DHX16", "RBMX", "SF3B2", "SRSF1", "RBM17", "ACIN1", "PRPF3", "U2AF2", "SNRNP200", "RBM8A", "DDX42") # KEGG
+
+splicing.sites <- hSPSs[which(SPSs.gene %in% union(spliceosome.gene, splicing.gene))]
+```
+
+## cancer mutation affectting phosphosites TCGA and PCAGW
+```{r}
+mutated_sites_TCGA <- read.delim("../public resource/mc3_mutations_affecting_ptm_sites.tsv", header = T)
+mutatedSites_TCGA <- paste(mutated_sites_TCGA$gene, ";", mutated_sites_TCGA$site.residue, mutated_sites_TCGA$site.position, ";", sep = "")
+
+## caclulate how many sites has mutation
+barplot(c(length(which(hSPSs %in% mutatedSites_TCGA))/length(hSPSs) * 100,
+        length(which(phosphosites.human$Var1 %in% mutatedSites_TCGA))/length(phosphosites.human$Var1) *100),
+        names.arg = c("SPS", "All"), las = 2,
+        main = "mutation affecting phosphosites (%)", col = c("#E41A1C", "#F29403"))
+
+##
+mutated_sites_PCAWG <- read.table("../public resource/pcawg_mutations_affecting_ptm_sites.tsv", skip = 1)
+mutatedSites_PCAWG <- paste(mutated_sites_PCAWG$V1, ";", mutated_sites_PCAWG$V7, mutated_sites_PCAWG$V6, ";", sep = "")
+
+barplot(c(length(which(hSPSs %in% mutatedSites_PCAWG))/length(hSPSs) * 100,
+        length(which(phosphosites.human$Var1 %in% mutatedSites_PCAWG))/length(phosphosites.human$Var1) * 100),
+        names.arg = c("SPS", "All"), las = 2,
+        main = "PCAWG mutation affecting phosphosites (%)", col = c("#E41A1C", "#F29403"))
+
+
+## combine two sets
+mutatedSites <- union(mutatedSites_TCGA, mutatedSites_PCAWG)
+splicing.sites[which(splicing.sites %in% mutatedSites)]
+```
+
+## cancer mutation enrichment (odd ratio)
+```{r}
+tab1<- cbind(table(hSPSs %in% mutatedSites),
+             table(splicing.sites %in% mutatedSites))
+colnames(tab1) <- c("Splicing sites", "SPS")
+
+oddsratio.wald(tab1)$measure
+oddsratio.wald(tab1)$p.value
+oddsratio.wald(tab1)$data
+
+tab2 <- cbind(table(phosphosites.human$Var1 %in% mutatedSites), 
+              table(splicing.sites %in% mutatedSites))
+colnames(tab2) <- c("Splicing sites", "All sitse")
+
+oddsratio.wald(tab2)$measure
+oddsratio.wald(tab2)$p.value
+oddsratio.wald(tab2)$data
+
+tab3 <- cbind(table(phosphosites.human$Var1 %in% mutatedSites),
+              table(hSPSs %in% mutatedSites))
+colnames(tab3) <- c("SPS", "All sitse")
+
+oddsratio.wald(tab3)$measure
+oddsratio.wald(tab3)$p.value
+oddsratio.wald(tab3)$data
+
+
+## visulisaztion
+boxLabels <- c("Splicing sites vs SPS", "SPS vs All sites", "Splicing sites vs All sites")
+boxLabels=factor(boxLabels, levels=boxLabels)
+df <- data.frame(yAxis = boxLabels,
+  boxOdds = 
+   c(oddsratio.wald(tab1)$measure[2,1],
+     oddsratio.wald(tab3)$measure[2,1],
+     oddsratio.wald(tab2)$measure[2,1]),
+  boxCILow = 
+   c(oddsratio.wald(tab1)$measure[2,2],
+     oddsratio.wald(tab3)$measure[2,2],
+     oddsratio.wald(tab2)$measure[2,2]),
+  boxCIHigh = 
+  c(oddsratio.wald(tab1)$measure[2,3],
+    oddsratio.wald(tab3)$measure[2,3],
+    oddsratio.wald(tab2)$measure[2,3])
+)
+  
+p <- ggplot(df, aes(x = boxOdds, y = yAxis)) +
+    geom_vline(aes(xintercept = 1), size = .25, linetype = 'dashed') +
+    geom_errorbarh(aes(xmax = boxCIHigh, xmin = boxCILow), size = .5, height = 
+                       .2, color = 'gray50') +
+    geom_point(size = 3.5, color = 'orange') +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank()) +
+    scale_x_continuous(breaks = seq(0,7,1) ) +
+    coord_trans(x = 'log10') +
+    ylab('') +
+    xlab('Odds ratio (log scale)') +
+    ggtitle('Cancer mutation enrichment')
+
+```
+
+## in which complex it has been identified (from spliceosome database) http://spliceosomedb.ucsc.edu/
+```{r}
+spliceosomedb <- read_xlsx("public resource/spliceosomedb.xlsx")
+
+spliceosomedb <- spliceosomedb[spliceosomedb$Species == "H. sapiens", ]
+spliceosomedb <- spliceosomedb[!is.na(spliceosomedb$Complex),]
+spliceosomedb$combine <- paste(spliceosomedb$...1, spliceosomedb$Complex, " complex", sep = "")
+
+map <- matrix(nrow = length(unique(spliceosomedb$...1)), ncol = 8)
+rownames(map) <- unique(spliceosomedb$...1)[order(unique(spliceosomedb$...1))]
+colnames(map) <- c("E complex", "A complex", "Pre-B complex", "B complex", "Bact complex", "B* complex", "C complex", "P complex")
+for (i in 1:nrow(map)) {
+    for (j in 1: ncol(map)) {
+        tmp <- paste(rownames(map)[i], colnames(map)[j], sep = "")
+        if (tmp %in% spliceosomedb$combine) {
+            map[i,j] <- 1
+        }
+    }
+}
+```
+
+## CDKs association
+```{r}
+CDK.substrate <- unlist(PhosphoSite.human[grep("^CDK", names(PhosphoSite.human))])
+CDK.substrate.gene <- sapply(strsplit(CDK.substrate, ";"), function(x)x[1])
+
+intersect(union(spliceosome.gene, splicing.gene), CDK.substrate.gene)
+intersect(splicing.sites, CDK.substrate)
+
+for (site in splicing.sites) {
+    tmp <- which(sapply(PhosphoSite.human, function(x) which(site %in% x)) > 0)
+    print(site)
+    print(tmp)
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

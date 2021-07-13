@@ -1,0 +1,272 @@
+---
+title: "Evaluating the stability of SPSs"
+author: "Di Xiao, Pengyi Yang"
+date: "`r paste0('Initiated on 2021 April, compiled on ', format(Sys.time(), '%Y %b %d'))`"
+output:
+  html_document:
+    code_folding: hide
+    fig_height: 6
+    fig_width: 6
+    toc: yes
+    number_sections: true
+    toc_depth: 3
+    toc_float: yes
+    theme: paper
+editor_options: 
+  chunk_output_type: console
+---
+
+# set up environment
+```{r}
+setwd("~/Dropbox (Sydney Uni)/Mining of publicly available phosphoproteomics data identify common signalome/repo/")
+
+library(ggplot2)
+library(PhosR)
+library(dendextend)
+library(clusteval)
+library(reshape2)
+library(mclust)
+
+source("R/Functions.R")
+```
+
+# evaluate stability using three independent datasets
+## set up three phosphosites sets for comparison
+```{r}
+load("datasets/human_SPS_v2.Rdata")
+hSPSs <- names(which(fisher.adj.p < 0.01))
+
+## ranking
+SPS.rank <- sort(fisher.adj.p, decreasing = FALSE)
+
+## size-matched middle- or bottom ranked sets
+mid.rank <- names(SPS.rank[(round(length(SPS.rank)/2) - 163): (round(length(SPS.rank)/2) + 162)]) 
+bot.rank <- names(SPS.rank[(length(SPS.rank) - 325) : length(SPS.rank)])
+```
+
+## ESC diff dataset
+
+```{r}
+## logFC
+
+load("datasets/phospho.ESC.ratio.pe.RData") # tatio dataset
+compareFC(phospho.ESC.ratio.pe, assay = "Quantification")
+
+## clustering using either SPS or all sites
+labels <- colnames(phospho.ESC.ratio.pe@assays@data$Quantification)
+grps <- gsub("_\\d+", "", labels)
+plotQC(phospho.ESC.ratio.pe@assays@data$Quantification, panel = "pca", grps=grps, labels=labels)
+
+sites <- paste(phospho.ESC.ratio.pe@GeneSymbol, paste(phospho.ESC.ratio.pe@Residue, phospho.ESC.ratio.pe@Site, sep=""), "", sep=";")
+idx <- sites %in% hSPSs
+plotQC(phospho.ESC.ratio.pe@assays@data$Quantification[idx,], panel = "pca", grps=grps, labels=labels)
+
+## heatmap of hSPSs or all sites
+load("datasets/ESC.phospho.RData")
+sub.corheatmap <- function(mat, low=0.5, midpoint=0.75) {
+  cormat <- cor(mat)
+  melted_cormat <- melt(cormat)
+  ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) +
+    geom_tile(color = "white")+
+    scale_fill_gradient2(low = "white", high = "#14123D", mid = "#85CFF3",
+     midpoint = midpoint, limit = c(low,1), space = "Lab",
+     breaks = seq(low,1,0.1),
+     name="Pearson\nCorrelation") +
+    theme_minimal()+
+    theme(axis.text.x = element_text(angle = 45, vjust = 1,
+      size = 12, hjust = 1))+
+    xlab(grps) +
+   coord_fixed()
+}
+
+sub.corheatmap(phospho.impute.sva.median)
+
+sites <- sapply(strsplit(rownames(phospho.impute.sva.median), "~"), function(x){paste(toupper(x[2]), x[3], "", sep=";")})
+SPSs.withoutResidue <- paste(sapply(strsplit(hSPSs, ";"), function(x){x[1]}), gsub("[STY]", "", sapply(strsplit(hSPSs, ";"), function(x){x[2]})), "", sep=";")
+
+phospho.impute.sva.median.mapped <- phospho.impute.sva.median[sites %in% SPSs.withoutResidue,]
+sub.corheatmap(phospho.impute.sva.median.mapped)
+
+## concordance between origianl label and clustering results 
+## clustering
+plotQC(phospho.impute.sva.median, grps=grps, panel="dendrogram", labels=labels)
+plotQC(phospho.impute.sva.median.mapped, grps=grps, panel="dendrogram", labels=labels)
+
+b <- which(sites %in% SPSs.withoutResidue)
+hc.a <- hclust(dist(t(phospho.impute.sva.median)))
+ARI.a <- adjustedRandIndex(cutree(hc.a, k=12), grps)
+FMI.a <- FM_index(cutree(hc.a, k=12), grps)
+NMI.a <- igraph::compare(as.numeric(factor(cutree(hc.a, k=12))), as.numeric(factor(grps)), method = "nmi")
+Purity.a <- ClusterPurity(cutree(hc.a, k=12), grps)
+Jaccard.a <- cluster_similarity(as.numeric(factor(cutree(hc.a, k=12))), as.numeric(factor(grps)), similarity = "jaccard", method = "independence")
+
+hc.b <- hclust(dist(t(phospho.impute.sva.median[b,])))
+ARI.b <- adjustedRandIndex(cutree(hc.b, k=12), grps)
+FMI.b <- FM_index(cutree(hc.b, k=12), grps)
+NMI.b <- igraph::compare(as.numeric(factor(cutree(hc.b, k=12))), as.numeric(factor(grps)), method = "nmi")
+Purity.b <- ClusterPurity(cutree(hc.b, k=12), grps)
+Jaccard.b <- cluster_similarity(as.numeric(factor(cutree(hc.b, k=12))), as.numeric(factor(grps)), similarity = "jaccard", method = "independence")
+
+par(mfrow = c(5,1))
+barplot(c(ARI.a, ARI.b), main = "ARI", horiz = TRUE)
+barplot(c(FMI.a, FMI.b), main = "FMI", horiz = TRUE)
+barplot(c(NMI.a, NMI.b), main = "NMI", horiz = TRUE)
+barplot(c(Purity.a, Purity.b), main = "Purity", horiz = TRUE)
+barplot(c(Jaccard.a, Jaccard.b), main = "Jaccard", horiz = TRUE)
+```
+
+## glioblastoma datset
+
+```{r}
+## log2FC
+load("datasets/Glioblastoma.phospho.RData")
+phospho.glioblastoma <- phospho.impute[,-c(1:12)]
+phospho.glioblastoma.ratio <- phospho.glioblastoma - rowMeans(phospho.glioblastoma[,grep("CTRL", colnames(phospho.glioblastoma))])
+sites <- sapply(strsplit(rownames(phospho.glioblastoma.ratio), "~"), function(x)paste(x[2], x[3], "", sep = ";"))
+mat <- phospho.glioblastoma.ratio
+rownames(mat) <- sites
+mat.max <- apply(mat, 1, function(x) max(abs(x)))
+boxplot(mat.max[which(rownames(mat) %in% hSPSs)],
+        mat.max[which(rownames(mat) %in% mid.rank)],
+        mat.max[which(rownames(mat) %in% bot.rank)],
+        mat.max[-which(rownames(mat) %in% hSPSs)],
+        notch = TRUE, col = scPalette(5)[c(1,2,3,5)], names = c("SPSs", "Middle", "Bottom", "non-SPSs"), las = 2)
+
+## concordance between origianl label and clustering results
+grps <- gsub("Pharmacological_", "", gsub("_\\d$", "", colnames(phospho.glioblastoma)))
+b <- sapply(strsplit(rownames(phospho.impute), "~"), function(x){paste(x[2], x[3], "", sep=";")}) %in% hSPSs
+
+plotQC(phospho.glioblastoma, grps=grps, panel="pca", labels=grps)
+plotQC(phospho.glioblastoma[b,], grps=grps, panel="pca", labels=grps)
+
+plotQC(phospho.glioblastoma, grps=grps, panel="dendrogram", labels=grps)
+plotQC(phospho.glioblastoma[b,], grps=grps, panel="dendrogram", labels=grps)
+
+## cut hierarchical tree into 5 clusters
+hc <- hclust(dist(t(phospho.glioblastoma)))
+adjustedRandIndex(cutree(hc, k=5), grps)
+hc <- hclust(dist(t(phospho.glioblastoma[b,])))
+adjustedRandIndex(cutree(hc, k=5), grps)
+
+## concordance performance matrix
+hc.a <- hclust(dist(t(phospho.glioblastoma)))
+ARI.a <- adjustedRandIndex(cutree(hc.a, k=5), grps)
+FMI.a <- FM_index(cutree(hc.a, k=5), grps)
+NMI.a <- igraph::compare(as.numeric(factor(cutree(hc.a, k=5))), as.numeric(factor(grps)), method = "nmi")
+Purity.a <- ClusterPurity(cutree(hc.a, k=5), grps)
+Jaccard.a <- cluster_similarity(as.numeric(factor(cutree(hc.a, k=5))), as.numeric(factor(grps)), similarity = "jaccard", method = "independence")
+
+hc.b <- hclust(dist(t(phospho.glioblastoma[b,])))
+ARI.b <- adjustedRandIndex(cutree(hc.b, k=5), grps)
+FMI.b <- FM_index(cutree(hc.b, k=5), grps)
+NMI.b <- igraph::compare(as.numeric(factor(cutree(hc.b, k=5))), as.numeric(factor(grps)), method = "nmi")
+Purity.b <- ClusterPurity(cutree(hc.b, k=5), grps)
+Jaccard.b <- cluster_similarity(as.numeric(factor(cutree(hc.b, k=5))), as.numeric(factor(grps)), similarity = "jaccard", method = "independence")
+
+par(mfrow = c(5,1))
+barplot(c(ARI.a, ARI.b), main = "ARI", horiz = TRUE)
+barplot(c(FMI.a, FMI.b), main = "FMI", horiz = TRUE)
+barplot(c(NMI.a, NMI.b), main = "NMI", horiz = TRUE)
+barplot(c(Purity.a, Purity.b), main = "Purity", horiz = TRUE)
+barplot(c(Jaccard.a, Jaccard.b), main = "Jaccard", horiz = TRUE)
+```
+
+## adipocyte dataset
+
+```{r}
+## log2FC
+load("datasets/phospho_L1_redox.RData")
+phospho.L1.redox.ratio[, c(1:4, 9:12, 17:20)] <- phospho.L1.redox[, c(1:4, 9:12, 17:20)] - rowMeans(phospho.L1.redox[, c(17:20)])
+phospho.L1.redox.ratio[, c(5:8, 13:16, 21:24)] <- phospho.L1.redox[, c(5:8, 13:16, 21:24)] - rowMeans(phospho.L1.redox[, c(21:24)])
+
+sites <- sapply(strsplit(rownames(phospho.L1.redox.ratio), "~"), function(x)paste(toupper(x[2]), x[3], "", sep = ";"))
+mat <- phospho.L1.redox.ratio
+rownames(mat) <- sites
+mat.max <- apply(mat, 1, function(x) max(abs(x)))
+boxplot(mat.max[which(rownames(mat) %in% hSPSs)],
+        mat.max[which(rownames(mat) %in% mid.rank)],
+        mat.max[which(rownames(mat) %in% bot.rank)],
+        mat.max[-which(rownames(mat) %in% hSPSs)],
+        notch = TRUE, col = scPalette(5)[c(1,2,3,5)], names = c("SPSs", "Middle", "Bottom", "non-SPSs"), las = 2)
+
+## clustering
+grps <- gsub("_\\d", "", gsub("Intensity.Phospho_", "", colnames(phospho.L1.redox)))
+plotQC(phospho.L1.redox, grps=grps, panel="pca", labels=grps)
+plotQC(phospho.L1.redox, grps=grps, panel="dendrogram", labels=grps)
+
+b <- sapply(strsplit(rownames(phospho.L1.redox), "~"), function(x){paste(toupper(x[2]), x[3], "", sep=";")}) %in% hSPSs
+
+plotQC(phospho.L1.redox[b,], grps=grps, panel="pca", labels=grps)
+plotQC(phospho.L1.redox[b,], grps=grps, panel="dendrogram", labels=grps)
+
+## concordance between clustering results and original labels
+hc.a <- hclust(dist(t(phospho.L1.redox)))
+ARI.a <- adjustedRandIndex(cutree(hc.a, k=6), grps)
+FMI.a <- FM_index(cutree(hc.a, k=6), grps)
+NMI.a <- igraph::compare(as.numeric(factor(cutree(hc.a, k=6))), as.numeric(factor(grps)), method = "nmi")
+Purity.a <- ClusterPurity(cutree(hc.a, k=6), grps)
+Jaccard.a <- cluster_similarity(as.numeric(factor(cutree(hc.a, k=6))), as.numeric(factor(grps)), similarity = "jaccard", method = "independence")
+
+hc.b <- hclust(dist(t(phospho.L1.redox[b,])))
+ARI.b <- adjustedRandIndex(cutree(hc.b, k=6), grps)
+FMI.b <- FM_index(cutree(hc.b, k=6), grps)
+NMI.b <- igraph::compare(as.numeric(factor(cutree(hc.b, k=6))), as.numeric(factor(grps)), method = "nmi")
+Purity.b <- ClusterPurity(cutree(hc.b, k=6), grps)
+Jaccard.b <- cluster_similarity(as.numeric(factor(cutree(hc.b, k=6))), as.numeric(factor(grps)), similarity = "jaccard", method = "independence")
+
+par(mfrow = c(5,1))
+barplot(c(ARI.a, ARI.b), main = "ARI", horiz = TRUE)
+barplot(c(FMI.a, FMI.b), main = "FMI", horiz = TRUE)
+barplot(c(NMI.a, NMI.b), main = "NMI", horiz = TRUE)
+barplot(c(Purity.a, Purity.b), main = "Purity", horiz = TRUE)
+barplot(c(Jaccard.a, Jaccard.b), main = "Jaccard", horiz = TRUE)
+```
+
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,256 @@
+---
+title: "Evaluating the stability of SPSs"
+author: "Di Xiao"
+date: "`r paste0('Initiated on 2021 April, compiled on ', format(Sys.time(), '%Y %b %d'))`"
+output:
+  html_document:
+    code_folding: hide
+    fig_height: 6
+    fig_width: 6
+    toc: yes
+    number_sections: true
+    toc_depth: 3
+    toc_float: yes
+    theme: paper
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# set environment
+```{r}
+library(ggplot2)
+library(PhosR)
+library(readxl)
+library(ggpubr)
+library(biomaRt)
+source("R/Functions.R")
+```
+
+# build up meta matrix with feature resource of phosphosites or host genes/proteins
+
+## set up a representitive random set for comparison
+```{r}
+load("datasets/human_SPS_v2.RData")
+hSPSs <- names(fisher.adj.p[which(fisher.adj.p < 0.01)])
+load("datasets/phosphosites_recurrence_human.RData")
+phosphosites.human <- recurrence
+phosphosites.human$geneSymbol <- sapply(strsplit(as.character(phosphosites.human$Var1), ";"), function(x)x[1])
+
+ranSites <- list()
+for (i in c(1:10)) {
+  set.seed(i)
+  ranSites[[i]] <- sample(phosphosites.human$Var1, 326)
+}
+```
+
+## from https://www.nature.com/articles/s41587-019-0344-3
+```{r}
+
+## functional score
+functionalScore <- readxl::read_xlsx("public resource/EMS84831-supplement-Table_S3.xlsx")
+### name mapping
+name.mapping <- read.delim("public resource//HUMAN_9606_idmapping.dat", header = FALSE)
+name.mapping <- name.mapping[which(name.mapping$V2 == "Gene_Name"), ]
+
+idx <- match(functionalScore$uniprot, name.mapping$V1)
+functionalScore$geneSymbol <- name.mapping$V3[idx]
+functionalScore$sites <- paste(functionalScore$geneSymbol, ";", functionalScore$position, ";", sep = "")
+
+phosphosites.human$siteNoResidue <- sapply(strsplit(as.character(phosphosites.human$Var1), ";"), function(x) paste(x[1], ";", gsub("[STY]", "", x[2]), ";", sep = "")) 
+idx <- match(phosphosites.human$siteNoResidue, functionalScore$sites)
+phosphosites.human$functionalScore <- functionalScore$functional_score[idx]
+
+## Disorder score
+landscape <- readxl::read_xlsx("public resource/41587_2019_344_MOESM4_ESM.xlsx")
+
+idx <- match(landscape$uniprot, name.mapping$V1)
+landscape$geneSymbol <- name.mapping$V3[idx]
+landscape$sites <- paste(landscape$geneSymbol, ";", landscape$residue, landscape$position, ";", sep = "")
+
+idx <- match(phosphosites.human$geneSymbol, toupper(name.mapping$V3))
+phosphosites.human$Uniprot <- name.mapping$V1[idx]
+
+idx <- match(phosphosites.human$Var1, landscape$sites)
+phosphosites.human$disorder <- as.numeric(landscape$disopred_score[idx])
+
+## Protein length
+phosphosites.human$protLength <- log2(as.numeric(landscape$prot_length[idx]))
+
+## phosphosite age: Age of inferred ancestral species containing the site based on window of 1 residues
+phosphosites.human$w0_mya <- as.numeric(landscape$w0_mya[idx])
+
+## conservative hotspot
+phosphosites.human$log10_hotspot_pval_min <- log2(as.numeric(landscape$log10_hotspot_pval_min[idx]))
+
+## Maximum mss score similarity between site flanking region and known kinases position weight matrix (PWM)
+phosphosites.human$PWM_max_mss <- as.numeric(landscape$PWM_max_mss[idx])
+
+## max netphorest match for all models
+phosphosites.human$netpho_max_all <- as.numeric(landscape$netpho_max_all[idx])
+```
+
+
+## from https://academic.oup.com/gigascience/article/8/9/giz106/5570567
+```{r}
+## conservation score
+conservationTable <- read.delim("public resource//hg38GENCODE26conservation.txt")
+
+### conert emsembl name to gene symbol
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+res <- getBM(attributes = c("ensembl_gene_id", "hgnc_symbol"), mart = mart)
+
+idx <- match(sapply(strsplit(as.character(conservationTable$gene), "\\."), function(x)x[1]), res$ensembl_gene_id)
+conservationTable$geneSymbol <- toupper(res$hgnc_symbol[idx])
+
+idx <- match(phosphosites.human$geneSymbol, conservationTable$geneSymbol)
+phosphosites.human$geneConservation <- conservationTable$score[idx]
+
+## SEGIndex
+hSEGIndex <- read.delim("public resource/hSEGIndex.txt")
+idx <- match(phosphosites.human$geneSymbol, rownames(hSEGIndex))
+phosphosites.human$hSEGIndex <- hSEGIndex$hHKIdx[idx]
+
+mSEGIndex <- read.delim("public resource/mSEGIndex.txt")
+idx <- match(phosphosites.human$geneSymbol, rownames(mSEGIndex))
+phosphosites.human$mSEGIndex <- as.numeric(mSEGIndex$mHKIdx[idx])
+```
+
+## from other rescource: protein abundance (PaxDb database)
+```{r}
+proteinAbund <- read.table("public resource/9606-WHOLE_ORGANISM-integrated.txt")
+
+## name mapping
+name.mapping.Ensembl_PRO <- name.mapping[which(name.mapping$V2 == "Ensembl_PRO"), ]
+
+idx <- match(phosphosites.human$Uniprot, sapply(strsplit(name.mapping.Ensembl_PRO$V1, "-"), function(x)x[1]))
+phosphosites.human$ensemblePro <- name.mapping.Ensembl_PRO$V3[idx]
+
+idx <- match(phosphosites.human$ensemblePro, sapply(strsplit(proteinAbund$V2, "\\."), function(x)x[2]))
+phosphosites.human$proteinAbundance <- log2(proteinAbund$V3[idx])
+```
+
+## the total phosphosite on host protein of SPSs
+```{r}
+SPS.host <- phosphosites.human[which(phosphosites.human$Var1 %in% hSPSs), "geneSymbol"]
+SPS.numOfSite <- c()
+for (i in c(1:326)) {
+  protein <- SPS.host[i]
+  SPS.numOfSite[[i]] <- length(which(phosphosites.human$geneSymbol == protein))
+}
+SPS.numOfSite <- unlist(SPS.numOfSite)
+
+random.host <- phosphosites.human[which(phosphosites.human$Var1 %in% ranSites[[6]]), "geneSymbol"]
+random.numOfSite <- c()
+for (i in c(1:326)) {
+  protein <- random.host[i]
+  random.numOfSite[[i]] <- length(which(phosphosites.human$geneSymbol == protein))
+}
+random.numOfSite <- unlist(random.numOfSite)
+
+all.host <- phosphosites.human[, "geneSymbol"]
+all.numOfSite <- c()
+for (i in c(1:length(all.host))) {
+  protein <- all.host[i]
+  all.numOfSite[[i]] <- length(which(phosphosites.human$geneSymbol == protein))
+}
+all.numOfSite <- unlist(all.numOfSite)
+
+boxplot(log2(SPS.numOfSite[which(SPS.numOfSite > 0)]), 
+        log2(random.numOfSite[which(random.numOfSite > 0)]), 
+        log2(all.numOfSite[which(all.numOfSite > 0)]),
+        names = c("SPS", "Random", "all sites"), notch = TRUE, 
+        col = c("#E41A1C", "#BC9DCC", "#F29403"))
+
+
+## the number of SPS and all phosphosites on SPS host
+boxplot(SPS.numOfSite, sapply(split(hSPSs, SPS.host), length),
+        names = c("SPSs on SPS host protein", "all phosphosites on SPS host protein"), notch = TRUE)
+
+wilcox.test(SPS.numOfSite, sapply(split(hSPSs, SPS.host), length), alternative = "greater")
+```
+
+## Vasulization
+```{r}
+for (feature in c("geneConservation", "hSEGIndex", "mSEGIndex", "functionalScore", "disorder", "log10_hotspot_pval_min",
+                  "w0_mya", "PWM_max_mss", "proteinAbundance", "netpho_max_all")) {
+    
+  ## remove na an inf
+    quan.hSPSs <- na.omit(phosphosites.human[which(phosphosites.human$Var1 %in% hSPSs), feature])
+    quan.hSPSs <- quan.hSPSs[!is.infinite(quan.hSPSs)]
+    
+    quan.random <- na.omit(phosphosites.human[which(phosphosites.human$Var1 %in% ranSites[[6]]), feature])
+    quan.random <- quan.random[!is.infinite(quan.random)]
+    
+    quan.all <- na.omit(phosphosites.human[, feature])
+    quan.all <- quan.all[!is.infinite(quan.all)]
+    
+    print(feature)
+    print(wilcox.test(quan.hSPSs, quan.random, alternative = "two.sided", exact = FALSE)$p.value)
+    print(wilcox.test(quan.hSPSs, quan.all, alternative = "two.sided", exact = FALSE)$p.value)
+
+    boxplot(quan.hSPSs,
+            quan.random,
+            quan.all,
+            names = c("SPS", "Random", "all sites"), notch = TRUE, 
+            ylab = feature, col = c("#E41A1C", "#BC9DCC", "#F29403"))
+}
+
+```
+
+## secondary structure
+```{r}
+## Sequence-based secondary structure prediction (8-classes)
+feature <- "SSpro8"
+idx <- match(phosphosites.human$Var1, landscape$sites)
+phosphosites.human[, feature] <- landscape[idx, feature]
+
+structure <- rbind(as.data.frame(table(phosphosites.human[which(phosphosites.human$Var1 %in% hSPSs), feature])), 
+                   as.data.frame(table(phosphosites.human[which(phosphosites.human$Var1 %in% ranSites[[6]]), feature])),
+                   as.data.frame(table(phosphosites.human[, feature])))
+structure$type <- c(rep("SPS", 5), rep("Random", 5), rep("non-SPS", 9))
+
+
+palette = c("#377EB8", "#E41A1C", "#4DAF4A", "#984EA3", "#F29403", "#F781BF", "#BC9DCC", "#A65628", "#54B0E4")
+names(palette) <- unique(structure$Var1)
+df1 <- as.data.frame(table(phosphosites.human[which(phosphosites.human$Var1 %in% hSPSs), feature]))
+df1$prot <- round(df1$Freq/sum(df1$Freq) * 100, 1)
+df1.agg <- data.frame(cat = c("c", "Other"), rbind(df1[1,2:3], colSums(df1[2:5, 2:3])))
+ggpie(df1.agg, "prot", label = "cat", fill = "cat", palette = palette[1:5])
+sub <- round(prop.table(df1[2:5, 3]) * 100, 1)
+df1.sub <- data.frame(prot = sub, cat = df1$Var1[2:5])
+ggpie(df1.sub, "prot", label = "prot", fill = "cat", palette = palette[1:5])
+
+df2 <- as.data.frame(table(phosphosites.human[which(phosphosites.human$Var1 %in% ranSites[[4]]), feature]))
+df2$prot <- round(df2$Freq/sum(df2$Freq) * 100, 1)
+ggpie(df2, "Freq", label = "prot", fill = "Var1", palette = palette[1:9])
+df2.agg <- data.frame(cat = c("c", "Other"), rbind(df2[1,2:3], colSums(df2[2:5, 2:3])))
+ggpie(df2.agg, "prot", label = "prot", fill = "cat", palette = palette[1:5])
+sub <- round(prop.table(df2[2:5, 3]) * 100, 1)
+df2.sub <- data.frame(prot = sub, cat = df2$Var1[2:5])
+ggpie(df2.sub, "prot", label = "prot", fill = "cat", palette = palette[1:5])
+
+df3 <- as.data.frame(table(phosphosites.human[, feature]))
+df3$prot <- round(df3$Freq/sum(df3$Freq) * 100, 1)
+ggpie(df3, "Freq", label = "prot", fill = "Var1", palette = palette[1:9])
+df3.agg <- data.frame(cat = c("c", "Other"), rbind(df3[2,2:3], colSums(df3[c(1,3:9), 2:3])))
+ggpie(df3.agg, "prot", label = "prot", fill = "cat", palette = palette[1:9])
+sub <- round(prop.table(df3[c(1,3:9), 3]) * 100, 1)
+df3.sub <- data.frame(prot = sub, cat = df3$Var1[c(1,3:9)])
+df3.sub.agg <- data.frame(cat = c("e", "h", "s", "t", "other"), rbind(df3.sub[c(2,4,7,8), ], sum(df3.sub[c(1,3,5,6), 1])))
+
+ggpie(df3.sub, "prot", label = "prot", fill = "cat", palette = palette[1:9])
+ggpie(df3.sub.agg, "prot", label = "prot", fill = "cat", palette = palette[1:9])
+
+# save(phosphosites.human, file = "datasets/feature_matrix.RData")
+```
+
+
+```{r}
+sessionInfo()
+```
+
+

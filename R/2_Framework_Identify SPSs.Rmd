@@ -1,0 +1,234 @@
+---
+title: "A statistical framework for identifying the stable phosphoproteome"
+author: "Di Xiao, Pengyi Yang"
+date: "`r paste0('Initiated on 2021 April, compiled on ', format(Sys.time(), '%Y %b %d'))`"
+output:
+  html_document:
+    code_folding: hide
+    fig_height: 6
+    fig_width: 6
+    toc: yes
+    number_sections: true
+    toc_depth: 3
+    toc_float: yes
+    theme: paper
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# set up environment
+```{r}
+setwd("~/Dropbox (Sydney Uni)/Mining of publicly available phosphoproteomics data identify common signalome/repo/")
+library(ggplot2)
+library(PhosR)
+source("R/Functions.R")
+```
+
+# load dataset
+```{r}
+load("datasets/phosData_53_human.RData")
+```
+
+# identify hSPSs
+## generate reccurence and maximum absolute log2FC matrix
+```{r}
+sites <- sites.unique <- mat.max <- list()
+n <- length(phosData)
+
+for (i in seq(n)) {
+    sites[[i]] <- paste(toupper(phosData[[i]]@GeneSymbol), ";",
+                        paste(phosData[[i]]@Residue, phosData[[i]]@Site, sep = ""), ";",
+                        sep = "")
+    sites.unique[[i]] <- unique(sites[[i]])
+    mat.mean <- phosData[[i]]@assays@data[["normalised"]]
+
+    sites.mean <- t(sapply(split(as.data.frame(mat.mean), 
+        sites[[i]]), colMeans))
+    sites.max <- apply(sites.mean, 1, function(x) {
+        x[which.max(abs(x))]
+    })
+    mat.max[[i]] <- sort(abs(sites.max), decreasing = TRUE)
+}
+    
+recurrence <- as.data.frame(table(unlist(sites.unique)))
+
+allsites <- as.character(recurrence[,1])
+phosphosites.maxFC.full <- data.frame(mat.max[[1]][allsites])
+for (i in 2:n) {
+  phosphosites.maxFC.full <- cbind(phosphosites.maxFC.full, mat.max[[i]][allsites])
+}
+rownames(phosphosites.maxFC.full) <- allsites
+colnames(phosphosites.maxFC.full) <- c(1:ncol(phosphosites.maxFC.full))
+
+# save(recurrence, "datasets/phosphosites_recurrence_human.RData")
+# save(phosphosites.maxFC.full, "datasets/phosphosites.maxFC.full.RData")
+```
+
+## the framework to identify hSPSs
+```{r}
+recur <- recurrence[,2]
+names(recur) <- recurrence[,1]
+hist(recur, freq = FALSE)
+
+# fitting the recurrence data with a gamma distribution
+library(MASS)
+
+f1.params <-fitdistr(recur, densfun="gamma")
+x <- recur
+den <- density(x)
+dat <- data.frame(x=den$x, y = den$y)
+
+ggplot(data = dat, aes(x = x,y = y)) + 
+  geom_point(size = 1) +     
+  geom_line(aes(x=dat$x, y=dgamma(dat$x, f1.params$estimate["shape"], f1.params$estimate["rate"])), color="red", size = 1) + 
+  theme_classic()
+
+p1 <- pgamma(recur, shape=f1.params$estimate[1], rate=f1.params$estimate[2], lower.tail = FALSE)
+names(p1) <- recurrence[,1]
+
+#plot(recur, p1)
+
+## fitting the fold change data with a gamma distribution
+# filter phosphosites that have very low quantification rates across datasets
+phosphosites.maxFC.filtered <- phosphosites.maxFC.full[which(rowSums(!is.na(phosphosites.maxFC.full)) > round(ncol(phosphosites.maxFC.full) / 5)),]
+
+library(preprocessCore)
+mn <- normalize.quantiles(as.matrix(phosphosites.maxFC.filtered))
+rownames(mn) <- rownames(phosphosites.maxFC.filtered)
+colnames(mn) <- colnames(phosphosites.maxFC.filtered)
+boxplot(mn)
+
+x <- apply(mn, 1, mean, na.rm=TRUE)
+hist(x, freq = FALSE, breaks = 50)
+
+f2.params <- fitdistr(x, densfun="gamma")
+den <- density(x)
+dat <- data.frame(x=den$x, y = den$y)
+
+ggplot(data = dat, aes(x = x,y = y)) + 
+  geom_point(size = 1) +     
+  geom_line(aes(x=dat$x, y=dgamma(dat$x, f2.params$estimate["shape"], f2.params$estimate["rate"])), color="red", size = 1) + 
+  theme_classic()
+
+p2 <- pgamma(x, shape=f2.params$estimate[1], rate=f2.params$estimate[2], lower.tail = TRUE)
+names(p2) <- rownames(mn)
+
+#plot(x, p2)
+
+
+# Fisher's method for combining the two elements
+o <- intersect(names(p1), names(p2))
+
+ps <- cbind(p1[o], p2[o])
+fisher.p <- apply(ps, 1, function(x){
+    pchisq(-2*sum(log(x)), 2*length(x), lower.tail = FALSE)
+})
+
+fisher.adj.p <- p.adjust(fisher.p, method = "BH")
+sum(fisher.adj.p < 0.01)
+sum(fisher.adj.p < 0.05)
+
+#save(fisher.adj.p, file="human_SPS_v2.RData")
+```
+
+## Essential QC for SPS identification
+```{r}
+# Essential QC
+hSPSs <- names(which(fisher.adj.p < 0.01))
+
+library(ggplot2)
+data <- data.frame(v1=c(recur, recur[hSPSs]), v2=rep(c("f1", "f2"), time=c(length(recur), length(recur[hSPSs]))))
+ggplot(data, aes(x=v1, fill=v2)) + geom_density(alpha=0.25, adjust=3) + theme_bw()
+
+data <- data.frame(v1=c(x, x[hSPSs]), v2=rep(c("f1", "f2"), time=c(length(x), length(x[hSPSs]))))
+ggplot(data, aes(x=v1, fill=v2)) + geom_density(alpha=0.25, adjust=3) + theme_bw()
+
+boxplot(recur[hSPSs], recur)
+boxplot(x[hSPSs], x)
+
+#### Relationship of the two components
+d <- densCols(recur[o], x[o], colramp=colorRampPalette(c("black", "white")))
+cols <-  colorRampPalette(c("gray", "darkblue", "deepskyblue2", "deepskyblue"))(256)
+colss <- cols[col2rgb(d)[1,] + 1L]
+plot(recur[o], x[o], col=colss)
+points(recur[hSPSs], x[hSPSs], col="red", pch=16)
+cor.test(recur[o], x[o])
+```
+
+## reproducibity of the framework
+
+```{r}
+## n is the number of subsamples
+framework <- function(phosData_sub) {
+    sites <- sites.unique <- mat.max <- list()
+    n <- length(phosData_sub)
+    assays <- "normalised"
+    
+    for (i in seq(n)) {
+        sites[[i]] <- paste(toupper(phosData_sub[[i]]@GeneSymbol), ";",
+                            paste(phosData_sub[[i]]@Residue, phosData_sub[[i]]@Site, sep = ""), ";",
+                            sep = "")
+        sites.unique[[i]] <- unique(sites[[i]])
+        mat.mean <- phosData_sub[[i]]@assays@data[[assays]]
+    
+        sites.mean <- t(sapply(split(as.data.frame(mat.mean), 
+            sites[[i]]), colMeans))
+        sites.max <- apply(sites.mean, 1, function(x) {
+            x[which.max(abs(x))]
+        })
+        mat.max[[i]] <- sort(abs(sites.max), decreasing = TRUE)
+    }
+    
+    o <- as.data.frame(table(unlist(sites.unique)))
+    o.order <- o[order(o$Freq, decreasing = TRUE), ]
+    
+    Ts <- data.frame(mat.max[[1]][as.character(o$Var1)])
+    for (i in 2:n) {
+        Ts <- cbind(Ts, mat.max[[i]][as.character(o$Var1)])
+    }
+    rownames(Ts) <- as.character(o$Var1)
+    
+    maxFC.mat <- Ts
+    recurrence <- o.order
+    result <- list(recurrence, maxFC.mat)
+    return(result)
+}
+
+subDatas.res <- list()
+for (i in c(1:10)) {
+    num <- sample(c(1:53), size = round(53 * 0.8))
+    phosData_sub <- phosData[num]
+    subDatas <- framework(phosData_sub)
+    subDatas.res[[i]] <- identifySPSs(subDatas[[1]], subDatas[[2]])
+}
+
+cors <- matrix(nrow = 10, ncol = 10)
+for (i in c(1:10)) {
+    for (j in c(1:10)) {
+        o <- intersect(names(subDatas.res[[i]][[3]]), names(subDatas.res[[j]][[3]]))
+        d <- densCols(subDatas.res[[i]][[3]][o], subDatas.res[[j]][[3]][o], colramp=colorRampPalette(c("black", "white")))
+        cols <-  colorRampPalette(c("gray", "darkblue", "deepskyblue2", "deepskyblue"))(256)
+        colss <- cols[col2rgb(d)[1,] + 1L]
+        plot(-log10(subDatas.res[[i]][[3]][o]), -log10(subDatas.res[[j]][[3]][o]), col=colss)
+        cors[i, j] <- cor.test(-log10(subDatas.res[[i]][[3]][o]), -log10(subDatas.res[[j]][[3]][o]))$estimate
+    }
+}
+
+## the shown one is
+i = 1
+j = 10
+
+```
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
